@@ -1,0 +1,30 @@
+buildscript {
+  dependencies {
+    classpath "com.squareup.wire:wire-gradle-plugin:$wireVersion"
+  }
+
+  repositories {
+    maven {
+      url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+    }
+    mavenCentral()
+    google()
+  }
+}
+
+apply plugin: 'application'
+apply plugin: 'com.squareup.wire'
+
+repositories {
+  maven {
+    url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+  }
+  mavenCentral()
+}
+
+wire{
+  dryRun = true
+
+  java{
+  }
+}

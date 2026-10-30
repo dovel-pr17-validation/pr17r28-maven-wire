@@ -1,0 +1,32 @@
+buildscript {
+  dependencies {
+    classpath "com.squareup.wire:wire-gradle-plugin:$wireVersion"
+  }
+
+  repositories {
+    maven {
+      url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+    }
+    mavenCentral()
+    google()
+  }
+}
+
+apply plugin: 'application'
+apply plugin: 'com.squareup.wire'
+
+// See installProtoJars task in wire-gradle-plugin/build.gradle.kts
+repositories {
+  maven {
+    url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+  }
+}
+
+wire {
+  sourcePath {
+    srcJar libs.allprotos
+    include 'squareup/geology/period.proto'
+  }
+  java{
+  }
+}

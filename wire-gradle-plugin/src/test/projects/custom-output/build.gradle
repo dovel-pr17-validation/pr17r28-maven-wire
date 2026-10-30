@@ -1,0 +1,40 @@
+import com.squareup.wire.schema.SchemaHandler
+import org.jetbrains.annotations.NotNull
+
+buildscript {
+  dependencies {
+    classpath "com.squareup.wire:wire-gradle-plugin:$wireVersion"
+  }
+
+  repositories {
+    maven {
+      url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+    }
+    mavenCentral()
+    google()
+  }
+}
+
+apply plugin: 'application'
+apply plugin: 'com.squareup.wire'
+
+class MyCustomHandlerFactory implements SchemaHandler.Factory {
+  @Override
+  SchemaHandler create(@NotNull List<String> includes, @NotNull List<String> excludes,
+      boolean exclusive, @NotNull String outDirectory, @NotNull Map<String, String> options) {
+    throw new RuntimeException("custom handler is running!! " +
+        includes.join(", ") + ", " + excludes.join(", ") + ", " + exclusive + ", " +
+        options.entrySet().toArray().join(", "));
+  }
+}
+
+wire {
+  sourcePath 'src/main/proto'
+
+  custom {
+    includes = ['squareup.dinosaurs.Dinosaur']
+    excludes = ['squareup.geology.Period']
+    options = [a: "one", b: "two", c: "three"]
+    schemaHandlerFactory = new MyCustomHandlerFactory()
+  }
+}

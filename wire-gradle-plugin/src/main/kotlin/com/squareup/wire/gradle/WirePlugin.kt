@@ -1,0 +1,296 @@
+/*
+ * Copyright (C) 2019 Square, Inc.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package com.squareup.wire.gradle
+
+import com.squareup.wire.gradle.internal.libraryProtoOutputPath
+import com.squareup.wire.gradle.internal.protoProjectDependenciesJvmConfiguration
+import com.squareup.wire.gradle.kotlin.WireSource
+import com.squareup.wire.gradle.kotlin.forEachWireSource
+import com.squareup.wire.schema.newEventListenerFactory
+import com.squareup.wire.wireVersion
+import java.io.File
+import java.util.concurrent.atomic.AtomicBoolean
+import org.gradle.api.Plugin
+import org.gradle.api.Project
+import org.gradle.api.artifacts.UnknownConfigurationException
+import org.gradle.api.tasks.SourceSet
+import org.gradle.api.tasks.SourceSetContainer
+import org.jetbrains.kotlin.gradle.dsl.KotlinMultiplatformExtension
+import org.jetbrains.kotlin.gradle.plugin.sources.DefaultKotlinSourceSet
+
+class WirePlugin : Plugin<Project> {
+  private val android = AtomicBoolean(false)
+  private val java = AtomicBoolean(false)
+  private val kotlin = AtomicBoolean(false)
+
+  private lateinit var extension: WireExtension
+  internal lateinit var project: Project
+
+  override fun apply(project: Project) {
+    this.extension = project.extensions.create("wire", WireExtension::class.java, project)
+    this.project = project
+
+    // Add default 'protoSource' and 'protoPath' configurations, which can be used in the
+    // dependencies {} block.
+    extension.addProtoPathProtoRootSet()
+    extension.addProtoSourceProtoRootSet()
+
+    project.configurations.create("protoProjectDependenciesJvm")
+      .also(protoProjectDependenciesJvmConfiguration(WirePlugin::class.java.classLoader))
+
+    val androidPluginHandler = { _: Plugin<*> ->
+      android.set(true)
+      // When `android.builtInKotlin` property is enabled, AGP provides Kotlin support for all projects without
+      // requiring users to apply the `org.jetbrains.kotlin.android` plugin.
+      project.extensions.findByName("kotlin")?.let { kotlin.set(true) }
+      if (project.extensions.findByType(KotlinMultiplatformExtension::class.java) != null) {
+        // Multiplatform project with an Android target. Wire generates into commonMain and reads
+        // the wire {} extension eagerly, so the setup must wait for the build script to be
+        // evaluated. This path does not use the Android variant API, so afterEvaluate is safe.
+        project.afterEvaluate { applyWirePlugin() }
+      } else {
+        // The Android setup must run now: the variant API used in forEachWireSource requires
+        // onVariants to be registered before AGP computes its variants.
+        applyWirePlugin()
+      }
+    }
+    project.plugins.withId("com.android.application", androidPluginHandler)
+    project.plugins.withId("com.android.library", androidPluginHandler)
+    project.plugins.withId("com.android.instantapp", androidPluginHandler)
+    project.plugins.withId("com.android.feature", androidPluginHandler)
+    project.plugins.withId("com.android.dynamic-feature", androidPluginHandler)
+
+    val kotlinPluginHandler = { _: Plugin<*> -> kotlin.set(true) }
+    project.plugins.withId("org.jetbrains.kotlin.multiplatform", kotlinPluginHandler)
+    project.plugins.withId("org.jetbrains.kotlin.jvm", kotlinPluginHandler)
+    // When `android.builtInKotlin`` property is disabled, the users  will need to apply either the
+    // `com.android.experimental.built-in-kotlin` plugin or the `org.jetbrains.kotlin.android` plugin to have Kotlin.
+    project.plugins.withId("com.android.experimental.built-in-kotlin", kotlinPluginHandler)
+    project.plugins.withId("org.jetbrains.kotlin.android", kotlinPluginHandler)
+
+    val javaPluginHandler = { _: Plugin<*> -> java.set(true) }
+    project.plugins.withId("java", javaPluginHandler)
+    project.plugins.withId("java-library", javaPluginHandler)
+
+    project.afterEvaluate {
+      if (extension.protoLibrary.get()) {
+        val existingProtoOutput = extension.outputs.get().filterIsInstance<ProtoOutput>().singleOrNull()
+        if (existingProtoOutput != null) {
+          // There exists a `proto {}` target already, we only set the output path if need be.
+          if (!existingProtoOutput.out.isPresent) {
+            existingProtoOutput.out.set(File(project.libraryProtoOutputPath()).path)
+          }
+        } else {
+          extension.proto { protoOutput ->
+            protoOutput.out.set(File(project.libraryProtoOutputPath()).path)
+          }
+        }
+      }
+
+      if (!android.get()) {
+        applyWirePlugin()
+      }
+
+      val outputs = extension.outputs.get()
+      check(outputs.isNotEmpty()) {
+        "At least one target must be provided for project '${project.path}\n" + "See our documentation for details: https://square.github.io/wire/wire_compiler/#customizing-output"
+      }
+      val hasJavaOutput = outputs.any { it is JavaOutput }
+      val hasKotlinOutput = outputs.any { it is KotlinOutput }
+      check(!hasKotlinOutput || kotlin.get()) {
+        "Wire Gradle plugin applied in " + "project '${project.path}' to generate Kotlin types but no supported Kotlin plugin was found"
+      }
+
+      project.addWireRuntimeDependency(hasJavaOutput, hasKotlinOutput)
+    }
+  }
+
+  private fun applyWirePlugin() {
+    check(android.get() || java.get() || kotlin.get()) {
+      "Wire Gradle plugin applied in " + "project '${project.path}' but unable to find either the Java, Kotlin, or Android plugin"
+    }
+
+    project.tasks.register(ROOT_TASK) {
+      it.group = GROUP
+      it.description = "Aggregation task which runs every generation task for every given source"
+    }
+
+    forEachWireSource(project, kotlin.get(), java.get(), android.get()) { source ->
+      setupWireTask(project, extension, source)
+    }
+  }
+
+  private fun setupWireTask(
+    project: Project,
+    extension: WireExtension,
+    source: WireSource,
+  ) {
+    val outputs = extension.outputs.get()
+    val nonProtoOutputs = outputs.filterNot { it is ProtoOutput }
+    val projectDir = project.projectDir
+    val projectDirectory = project.layout.projectDirectory
+    val defaultOutputPath = relativizeOutputDirectory(source.outputDir(project).path, projectDir)
+    val defaultOutputDirectory = project.providers.provider { defaultOutputPath }
+
+    val protoSourceProtoRootSets = extension.protoSourceProtoRootSets.toMutableList()
+    val protoPathProtoRootSets = extension.protoPathProtoRootSets.toMutableList()
+
+    if (protoSourceProtoRootSets.all { it.isEmpty }) {
+      val sourceSetProtoRootSet = WireExtension.ProtoRootSet(
+        project = project,
+        name = "${source.name}ProtoSource",
+      )
+      protoSourceProtoRootSets += sourceSetProtoRootSet
+      for (sourceFolder in source.defaultSourceFolders(project)) {
+        sourceSetProtoRootSet.srcDir(sourceFolder)
+      }
+    }
+
+    val targets = project.provider {
+      outputs.map { output ->
+        output.toTarget(output.outputDirectory(projectDir, defaultOutputDirectory).get())
+      }
+    }
+
+    val protoOutput = outputs.filterIsInstance<ProtoOutput>().singleOrNull()
+
+    val taskName = "generate${source.name.replaceFirstChar { it.uppercase() }}Protos"
+    val task = project.tasks.register(taskName, WireTask::class.java) { task: WireTask ->
+      task.group = GROUP
+      task.description = "Generate protobuf implementation for ${source.name}"
+
+      var addedSourcesDependencies = false
+      // Flatten all the input files here. Changes to any of them will cause the task to re-run.
+      for (rootSet in protoSourceProtoRootSets) {
+        task.source(rootSet.configuration)
+        if (!rootSet.isEmpty) {
+          // Use the isEmpty flag to avoid resolving the configuration eagerly
+          addedSourcesDependencies = true
+        }
+      }
+      // We only want to add ProtoPath sources if we have other sources already. The WireTask
+      // would otherwise run even through we have no sources.
+      if (addedSourcesDependencies) {
+        for (rootSet in protoPathProtoRootSets) {
+          task.source(rootSet.configuration)
+        }
+      }
+
+      nonProtoOutputs.forEach { output ->
+        val dir = project.objects.directoryProperty()
+        dir.set(
+          project.tasks.named(taskName).map {
+            projectDirectory.dir(output.outputDirectory(projectDir, defaultOutputDirectory).get())
+          },
+        )
+        task.outputDirectoriesList.add(dir)
+      }
+      task.protoSourceConfiguration.setFrom(project.configurations.getByName("protoSource"))
+      task.protoPathConfiguration.setFrom(project.configurations.getByName("protoPath"))
+      task.projectDependenciesJvmConfiguration.setFrom(project.configurations.getByName("protoProjectDependenciesJvm"))
+      if (protoOutput != null) {
+        task.protoLibraryOutput.set(
+          protoOutput.outputDirectory(projectDir, defaultOutputDirectory)
+            .map { projectDirectory.dir(it) },
+        )
+      }
+      task.sourceInput.set(project.provider { protoSourceProtoRootSets.inputLocations })
+      task.protoInput.set(project.provider { protoPathProtoRootSets.inputLocations })
+      task.roots.set(extension.roots)
+      task.prunes.set(extension.prunes)
+      task.moves.set(extension.moves)
+      task.opaques.set(extension.opaques)
+      task.sinceVersion.set(extension.sinceVersion)
+      task.untilVersion.set(extension.untilVersion)
+      task.onlyVersion.set(extension.onlyVersion)
+      task.rules.set(extension.rules)
+      task.targets.set(targets)
+      task.permitPackageCycles.set(extension.permitPackageCycles)
+      task.loadExhaustively.set(extension.loadExhaustively)
+      task.dryRun.set(extension.dryRun)
+      task.rejectUnusedRootsOrPrunes.set(extension.rejectUnusedRootsOrPrunes)
+
+      task.projectDirProperty.set(project.layout.projectDirectory)
+      task.buildDirProperty.set(project.layout.buildDirectory)
+
+      val factories = extension.eventListenerFactories.get() + extension.eventListenerFactoryClasses.get().map(::newEventListenerFactory)
+      task.eventListenerFactories.set(factories)
+    }
+
+    source.registerGeneratedSources(project, task, nonProtoOutputs)
+
+    val protoOutputDirectory = task.map { it.protoLibraryOutput }
+    if (protoOutput != null) {
+      val sourceSets = project.extensions.getByType(SourceSetContainer::class.java)
+      // Note that there are no source sets for some platforms such as native.
+      // TODO(Benoit) Probably should be checking for other names than `main`. As well, source
+      //  sets might be created 'afterEvaluate'. Does that mean we should do this work in
+      //  `afterEvaluate` as well? See: https://kotlinlang.org/docs/multiplatform-dsl-reference.html#source-sets
+      if (sourceSets.findByName("main") != null) {
+        sourceSets.getByName("main") { main: SourceSet ->
+          main.resources.srcDir(protoOutputDirectory)
+        }
+      } else {
+        project.logger.warn("${project.displayName} doesn't have a 'main' source sets. The .proto files will not automatically be added to the artifact.")
+      }
+    }
+
+    project.tasks.named(ROOT_TASK).configure {
+      it.dependsOn(task)
+    }
+  }
+
+  private fun Project.addWireRuntimeDependency(
+    hasJavaOutput: Boolean,
+    hasKotlinOutput: Boolean,
+  ) {
+    if (!hasJavaOutput && !hasKotlinOutput) return
+
+    // Indicates when the plugin is applied inside the Wire repo to Wire's own modules.
+    val isInternalBuild = project.providers.gradleProperty("com.squareup.wire.internal").getOrElse("false").toBoolean()
+    val isMultiplatform = project.plugins.hasPlugin("org.jetbrains.kotlin.multiplatform")
+    val runtimeDependency = wireRuntimeDependency(isInternalBuild)
+
+    when {
+      isMultiplatform -> {
+        val sourceSets =
+          project.extensions.getByType(KotlinMultiplatformExtension::class.java).sourceSets
+        val sourceSet = (sourceSets.getByName("commonMain") as DefaultKotlinSourceSet)
+        project.dependencies.add(sourceSet.apiConfigurationName, runtimeDependency)
+      }
+
+      else -> {
+        try {
+          project.dependencies.add("api", runtimeDependency)
+        } catch (_: UnknownConfigurationException) {
+          // No `api` configuration on Java applications.
+          project.dependencies.add("implementation", runtimeDependency)
+        }
+      }
+    }
+  }
+
+  private fun wireRuntimeDependency(isInternalBuild: Boolean): Any = if (isInternalBuild) {
+    project.project(":wire-runtime")
+  } else {
+    project.dependencies.create("com.squareup.wire:wire-runtime:$wireVersion")
+  }
+
+  internal companion object {
+    const val ROOT_TASK = "generateProtos"
+    const val GROUP = "wire"
+  }
+}

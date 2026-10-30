@@ -1,0 +1,36 @@
+buildscript {
+  dependencies {
+    classpath "com.squareup.wire:wire-gradle-plugin:$wireVersion"
+  }
+
+  repositories {
+    maven {
+      url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+    }
+    mavenCentral()
+    google()
+  }
+}
+
+apply plugin: 'application'
+apply plugin: 'com.squareup.wire'
+
+// See installProtoJars task in wire-gradle-plugin/build.gradle.kts
+repositories {
+  maven {
+    url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+  }
+}
+
+wire {
+  sourcePath {
+    srcJar 'only-dinosaur-1.0.aar'
+    include 'squareup/dinosaurs/dinosaur.proto'
+  }
+  protoPath {
+    srcDir 'src/main/proto'
+    include 'squareup/geology/period.proto'
+  }
+  java{
+  }
+}

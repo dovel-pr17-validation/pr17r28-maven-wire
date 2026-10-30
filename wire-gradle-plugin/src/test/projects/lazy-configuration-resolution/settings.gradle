@@ -1,0 +1,20 @@
+pluginManagement {
+  repositories {
+    maven {
+      url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+    }
+    google()
+    mavenCentral()
+  }
+}
+
+include ':wire-project'
+include ':dep-project'
+
+dependencyResolutionManagement {
+  versionCatalogs {
+    libs {
+      from(files('../../../../../gradle/libs.versions.toml'))
+    }
+  }
+}

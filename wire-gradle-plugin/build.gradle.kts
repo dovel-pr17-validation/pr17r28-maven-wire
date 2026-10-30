@@ -1,0 +1,122 @@
+import org.gradle.api.attributes.java.TargetJvmVersion
+import org.jetbrains.kotlin.gradle.dsl.JvmTarget
+import org.jetbrains.kotlin.gradle.tasks.KotlinJvmCompile
+
+plugins {
+  kotlin("jvm")
+  id("com.github.gmazzo.buildconfig")
+  id("java-gradle-plugin")
+  id("com.gradle.plugin-publish").version("2.1.1").apply(false)
+}
+
+// This module is included in two projects:
+// - In the root project where it's released as one of our artifacts
+// - In build-support project where we can use it for the test-schema and samples.
+//
+// We only want to publish when it's being built in the root project.
+if (project.rootProject.name == "wire") {
+  apply(plugin = "com.gradle.plugin-publish")
+} else {
+  // Move the build directory when included in build-support so as to not poison the real build.
+  // If we don't there's a chance incorrect build config values (configured below) will be used.
+  layout.buildDirectory = File(rootDir, "build/wire-gradle-plugin")
+}
+
+gradlePlugin {
+  website.set("https://github.com/square/wire")
+  vcsUrl.set("https://github.com/square/wire")
+  description = "generate code from .proto files"
+  plugins {
+    create("wire") {
+      id = "com.squareup.wire"
+      displayName = "Wire"
+      implementationClass = "com.squareup.wire.gradle.WirePlugin"
+      description = "generate code from .proto files"
+      tags.set(listOf("wire", "protobuf"))
+    }
+  }
+}
+
+// Make TestKit's plugin classpath also include AGP
+configurations.register("agpForTests")
+
+tasks.named<PluginUnderTestMetadata>("pluginUnderTestMetadata") {
+  pluginClasspath.from(configurations.named("agpForTests"))
+}
+
+dependencies {
+  add("agpForTests", libs.pluginz.android)
+  add("agpForTests", libs.pluginz.androidBuiltInKotlin)
+
+  compileOnly(gradleApi())
+  compileOnly(libs.pluginz.android)
+  compileOnly(libs.pluginz.kotlin)
+
+  implementation(projects.wireCompiler)
+  implementation(projects.wireKotlinGenerator)
+  implementation(libs.swiftpoet)
+
+  testImplementation(libs.junit)
+  testImplementation(libs.assertk)
+  testImplementation(projects.wireTestUtils)
+}
+
+val installProtoJars by tasks.registering(Copy::class) {
+  into("${rootDir.path}/build/localMaven")
+  from("${projectDir.path}/src/test/libs")
+}
+
+tasks.withType<Test>().configureEach {
+  jvmArgs("--add-opens", "java.base/java.util=ALL-UNNAMED")
+  dependsOn(installProtoJars)
+  dependsOn(":wire-gradle-plugin:publishAllPublicationsToLocalMavenRepository")
+  dependsOn(":wire-compiler:publishAllPublicationsToLocalMavenRepository")
+  dependsOn(":wire-java-generator:publishAllPublicationsToLocalMavenRepository")
+  dependsOn(":wire-kotlin-generator:publishAllPublicationsToLocalMavenRepository")
+  dependsOn(":wire-swift-generator:publishAllPublicationsToLocalMavenRepository")
+  dependsOn(":wire-runtime:publishAllPublicationsToLocalMavenRepository")
+  dependsOn(":wire-schema:publishAllPublicationsToLocalMavenRepository")
+  dependsOn(":wire-grpc-client:publishAllPublicationsToLocalMavenRepository")
+
+  inputs.dir(project.file("src/test/projects"))
+}
+
+val test by tasks.getting(Test::class) {
+  // Fixtures run in a separate JVM, routing properties from the VM running the build into test VM.
+  systemProperty("kjs", System.getProperty("kjs"))
+  systemProperty("knative", System.getProperty("knative"))
+}
+
+buildConfig {
+  useKotlinOutput {
+    internalVisibility = true
+    topLevelConstants = true
+  }
+
+  packageName("com.squareup.wire")
+  buildConfigField("String", "wireVersion", "\"${project.version}\"")
+}
+
+tasks.withType<JavaCompile>().configureEach {
+  sourceCompatibility = JavaVersion.VERSION_11.toString()
+  targetCompatibility = JavaVersion.VERSION_11.toString()
+}
+
+tasks.withType<KotlinJvmCompile>().configureEach {
+  compilerOptions {
+    jvmTarget.set(JvmTarget.JVM_11)
+    freeCompilerArgs.addAll(
+      listOf(
+        "-Xjdk-release=11"
+      ),
+    )
+  }
+}
+
+// AGP 9.3+ publishes its artifacts with Java 17 metadata. AGP is compileOnly here and this module
+// keeps Java 11 bytecode for its consumers, so only relax the resolution attribute.
+configurations.named("compileClasspath") {
+  attributes {
+    attribute(TargetJvmVersion.TARGET_JVM_VERSION_ATTRIBUTE, 17)
+  }
+}

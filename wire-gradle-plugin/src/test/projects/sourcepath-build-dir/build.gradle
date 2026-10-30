@@ -1,0 +1,40 @@
+buildscript {
+  dependencies {
+    classpath "com.squareup.wire:wire-gradle-plugin:$wireVersion"
+  }
+
+  repositories {
+    maven {
+      url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+    }
+    mavenCentral()
+    google()
+  }
+}
+
+apply plugin: 'application'
+apply plugin: 'com.squareup.wire'
+
+final String OUTPUT_REPO_DIR = "$buildDir/src/main/proto/squareup"
+
+task copyProtos(type: Copy) {
+  from 'src/main/copydir/squareup'
+  include 'dinosaurs/*.proto'
+  include 'geology/*.proto'
+
+  into OUTPUT_REPO_DIR
+  fileMode = 0644
+  includeEmptyDirs false
+}
+
+afterEvaluate {
+  tasks.getByName('generateProtos').dependsOn copyProtos
+}
+
+wire {
+  sourcePath {
+    srcDir OUTPUT_REPO_DIR
+  }
+  java{
+  }
+}

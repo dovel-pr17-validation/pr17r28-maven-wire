@@ -1,0 +1,36 @@
+buildscript {
+  dependencies {
+    classpath "com.squareup.wire:wire-gradle-plugin:$wireVersion"
+    classpath libs.pluginz.kotlin
+  }
+
+  repositories {
+    maven {
+      url new File(rootDir, "../../../../../build/localMaven").toURI().toString()
+    }
+    mavenCentral()
+    google()
+  }
+}
+
+apply plugin: 'application'
+apply plugin: 'org.jetbrains.kotlin.jvm'
+apply plugin: 'com.squareup.wire'
+
+wire {
+  // Blocking Server API.
+  kotlin {
+    exclusive = false
+    singleMethodServices = true
+    rpcCallStyle = 'blocking'
+    rpcRole = 'server'
+  }
+  // Coroutines Client API.
+  kotlin {
+    excludes = ['squareup.dinosaurs.Dinosaur', 'squareup.geology.Period']
+    exclusive = false
+    singleMethodServices = false
+    rpcCallStyle = 'suspending'
+    rpcRole = 'client'
+  }
+}
